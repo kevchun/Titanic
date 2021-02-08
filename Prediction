@@ -1,0 +1,126 @@
+library(caret)
+library(rpart)
+library(randomForest)
+library(corrplot)
+library(vip)
+library(rpart.plot)
+train<-read.csv("train.csv")
+test<-read.csv("test.csv")
+train$type<-"train"
+test$type<-"test"
+test$Survived<-""
+dat<-rbind(train,test)
+
+dat$Sex<-as.factor(dat$Sex)
+dat$Embarked<-as.factor(dat$Embarked)
+
+#Fare NA
+dat$Fare[is.na(dat$Fare)]<-median(dat$Fare,na.rm = TRUE)
+
+#Fare Outlier
+Q1.fare <- quantile(dat$Fare, probs=.25)
+Q3.fare <- quantile(dat$Fare, probs=.75)
+iqr.fare = Q3.fare-Q1.fare
+upper.fare = Q3.fare + (iqr.fare*1.5)
+lower.fare = Q1.fare - (iqr.fare*1.5)
+dat$Fare.o<-ifelse(dat$Fare >= upper.fare,1,0)
+
+#Siblings Outlier
+Q1.sb <- quantile(dat$SibSp, probs=.25)
+Q3.sb <- quantile(dat$SibSp, probs=.75)
+iqr.sb = Q3.sb-Q1.sb
+upper.sb = Q3.sb + (iqr.sb*1.5)
+lower.sb = Q1.sb - (iqr.sb*1.5)
+dat$sb.o<-ifelse(dat$SibSp >= upper.sb,1,0)
+
+#remove outlier
+dat<-dat[!(dat$type=="train" & dat$Fare.o+dat$sb.o==2),]
+dat<-subset(dat, select=-c(sb.o,Fare.o))
+
+#Impute Embarked
+dat$Embarked[dat$Embarked==""]<-"S"
+
+#Impute missing Age with Pclass, Parch and SibSp
+imputeage <- function(DF, i) {
+    sel <- DF$Pclass == DF$Pclass[i] & DF$Parch == DF$Parch[i] & DF$SibSp == DF$SibSp[i]
+    imputed <- median(DF$Age[sel], na.rm = TRUE)
+    if (is.na(imputed)) { # in case there is no match
+        imputed <- median(DF$Age, na.rm=TRUE)
+    }
+    return(imputed)
+}
+
+for (imissing in which(is.na(dat$Age))) {
+    dat$Age[imissing] <- imputeage(dat, imissing)
+}
+
+#Feature engineer Title
+dat$Name<-sub(". .*","",sub(".*, "," ",dat$Name))
+dat$Name[dat$Name %in% c(" Mr")] <- "Mr"
+dat$Name[dat$Name %in% c(" Master")] <- "Master"
+dat$Name[dat$Name %in% c(" Mrs"," Miss", " Ms", " Mme", " Mlle")] <- "Female"
+dat$Name[dat$Name %in% c(" Dona"," Don"," Rev", " Dr", " Major", " Lady", " Sir", " Col", " Capt", " th", " Jonkheer")]<- "Rare"
+dat$Name<-as.factor(dat$Name)
+
+#Feature engineer Family size
+dat$Fsize<- dat$SibSp + dat$Parch + 1
+dat$Fsize[dat$Fsize >= 5] <- "LFam"
+dat$Fsize[dat$Fsize == 1] <- "Single"
+dat$Fsize[dat$Fsize == 2] <- "SFam"
+dat$Fsize[dat$Fsize == 3| dat$Fsize == 4] <- "MFam"
+dat$Fsize<-as.factor(dat$Fsize)
+
+#Feature engineer Cabin
+dat$Cabin[dat$Cabin==""]<-"X"
+dat$Cabin<-substring(dat$Cabin,1 ,1)
+dat$Cabin<-as.factor(dat$Cabin)
+
+#Feature engineer Ticket
+dat$Ticket<-gsub(" .*","",dat$Ticket)
+dat$Ticket<-gsub("/.*","",dat$Ticket)
+dat$Ticket[!is.na(as.numeric(dat$Ticket))]<-"X"
+unique(dat$Ticket)
+dat$Ticket<-as.factor(dat$Ticket)
+
+#change Survived as factor
+dat$Survived[dat$Survived=="0"]<-"Dead"
+dat$Survived[dat$Survived=="1"]<-"Alive"
+
+
+#split
+train<-dat[dat$type=="train",]
+test<-dat[dat$type=="test",]
+train<-subset(train,select=-c(type))
+test<-subset(test,select=-c(type,Survived))
+
+#train control
+tr.ctrl<- trainControl(method="repeatedcv",
+                       number=10,
+                       repeats = 5,
+                       classProbs = TRUE,
+                       summaryFunction = twoClassSummary,
+                       savePredictions = "final",
+                       allowParallel = TRUE)
+
+train$Survived<-as.factor(train$Survived)
+#Random Forest
+set.seed(1337)
+tree.fit<- train(Survived ~ Pclass + Name + Sex + Age + SibSp + Parch + Ticket + Fare + Cabin + Embarked + Fsize , train, 
+                method="rpart", 
+                trControl=tr.ctrl,
+                metric="ROC")
+
+
+tree.pred<-predict.train(tree.fit,
+                 newdata=test)
+
+tree.pred<-as.data.frame(tree.pred)
+colnames(tree.pred)<-"Survived"
+tree.pred$Survived<-as.character(tree.pred$Survived)
+tree.pred$Survived[tree.pred$Survived=="Dead"]<-"0"
+tree.pred$Survived[tree.pred$Survived=="Alive"]<-"1"
+test$Survived<-tree.pred$Survived
+
+pred<-test[,c(1,13)]
+
+write.csv(pred,"C:/Users/kevin/Documents/Titanic/predrpart2.csv", row.names = FALSE)
